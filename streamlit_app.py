@@ -13,3 +13,8 @@ st.info(
     "Excel upload and AI-powered dashboard features "
     "will be added next."
 )
+uploaded_file = st.file_uploader(
+    "📁 Upload your Excel file",
+    type=["xlsx", "xls"]
+)
+df = pd.read_excel(uploaded_file)
