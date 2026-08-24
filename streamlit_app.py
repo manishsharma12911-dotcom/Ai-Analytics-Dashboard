@@ -94,7 +94,10 @@ CUSTOM_CSS = f"""
         padding: 0.8rem 1rem;
         font-size: 0.92rem;
         margin-bottom: 0.6rem;
+        color: {DARK} !important;
     }}
+    .qa-answer, .qa-answer * {{ color: {DARK} !important; }}
+    .qa-answer b {{ color: {PRIMARY} !important; }}
 
     div[data-testid="stMetricValue"] {{ font-weight: 700; }}
     .stTabs [data-baseweb="tab"] {{ font-weight: 600; }}
@@ -207,54 +210,88 @@ def kpi_card(label, value, delta=None, delta_positive=True):
 # ===========================================================
 # NATURAL-LANGUAGE QUERY ENGINE (rule-based, no external API)
 # ===========================================================
-def find_best_column_match(token, candidates):
-    """Fuzzy-ish match a word/phrase to a real column name."""
-    token = token.lower().strip()
+STOPWORDS = {
+    "show", "plot", "chart", "graph", "of", "by", "the", "a", "an", "for",
+    "in", "on", "total", "sum", "average", "avg", "mean", "top", "trend",
+    "over", "time", "distribution", "compare", "and", "vs", "versus", "me",
+    "please", "give", "what", "is", "are", "count", "min", "max", "minimum",
+    "maximum", "region", "category", "group", "wise", "breakdown",
+}
+
+
+def tokenize(text):
+    return re.findall(r"[a-zA-Z0-9%]+", text.lower())
+
+
+def find_best_column_match(query_tokens, candidates):
+    """Fuzzy-match query words against real column names (word-overlap based)."""
+    best_col, best_score = None, 0
     for col in candidates:
-        if token == str(col).lower():
-            return col
-    for col in candidates:
-        if token in str(col).lower() or str(col).lower() in token:
-            return col
-    return None
+        col_tokens = set(tokenize(str(col)))
+        overlap = sum(1 for t in query_tokens if t in col_tokens or any(t in ct or ct in t for ct in col_tokens))
+        if overlap > best_score:
+            best_score, best_col = overlap, col
+    return best_col if best_score > 0 else None
+
+
+def find_value_filter(query_tokens, df, category_cols):
+    """
+    Look for an actual data VALUE mentioned in the query (e.g. 'south' in a
+    Region column with value 'South') and return (column, value) to filter on.
+    """
+    for col in category_cols:
+        values = df[col].dropna().unique().tolist()
+        for val in values:
+            val_tokens = set(tokenize(str(val)))
+            if val_tokens and val_tokens.issubset(set(query_tokens)):
+                return col, val
+    return None, None
 
 
 def answer_query(query, df, numeric_cols, category_cols, date_cols):
     """
-    Very lightweight NL interpreter. Understands patterns like:
+    Lightweight NL interpreter. Understands patterns like:
       - "show/plot <measure> by <category>"
       - "top 5 <category> by <measure>"
       - "trend of <measure>"
       - "average/sum/count/min/max of <measure>"
       - "distribution of <measure>"
-      - "compare <measure> and <measure2>"
+      - "total <measure> in <value>"  (e.g. "total sales in south region")
     Returns (message, plotly_figure_or_None, dataframe_or_None)
     """
     q = query.lower().strip()
-    all_candidates = list(df.columns)
+    q_tokens = tokenize(q)
+
+    # ---- Detect a VALUE filter first (e.g. "south" -> Region == "South") ----
+    filter_col, filter_val = find_value_filter(q_tokens, df, category_cols)
+    working_df = df
+    filter_note = ""
+    if filter_col and filter_val is not None:
+        working_df = df[df[filter_col] == filter_val]
+        filter_note = f" where **{filter_col} = {filter_val}**"
+        # remove the value's own words so they don't get mistaken for column names
+        q_tokens = [t for t in q_tokens if t not in tokenize(str(filter_val))]
+
+    meaningful_tokens = [t for t in q_tokens if t not in STOPWORDS]
 
     # top N pattern
     top_match = re.search(r"top\s+(\d+)", q)
     n = int(top_match.group(1)) if top_match else None
 
-    # detect measure
-    measure = None
-    for col in numeric_cols:
-        if str(col).lower() in q:
-            measure = col
-            break
+    # ---- detect measure (numeric column) via fuzzy word match ----
+    measure = find_best_column_match(meaningful_tokens, numeric_cols)
     if measure is None and numeric_cols:
-        measure = numeric_cols[0]
+        # fall back to the business-relevant default rather than the first column
+        measure = choose_primary_measure(df) or numeric_cols[0]
 
-    # detect category
-    category = None
-    for col in category_cols:
-        if str(col).lower() in q:
-            category = col
-            break
+    # ---- detect category (only if explicitly referenced, not the filter column) ----
+    remaining_cat_cols = [c for c in category_cols if c != filter_col]
+    category = find_best_column_match(meaningful_tokens, remaining_cat_cols)
 
     # detect date
     date_col = date_cols[0] if date_cols else None
+
+    df = working_df  # use the filtered data for everything below
 
     # AGGREGATION QUERIES
     agg_map = {"average": "mean", "avg": "mean", "mean": "mean",
@@ -263,8 +300,11 @@ def answer_query(query, df, numeric_cols, category_cols, date_cols):
                "maximum": "max", "max": "max"}
     for word, func in agg_map.items():
         if word in q and measure:
+            if df.empty:
+                return f"No rows match{filter_note}.", None, None
             result = df[measure].agg(func)
-            msg = f"**{func.title()} of `{measure}`** = **{format_number(result) if func != 'count' else int(result)}**"
+            value_str = format_number(result) if func != "count" else f"{int(result):,}"
+            msg = f"**{func.title()} of `{measure}`**{filter_note} = **{value_str}**"
             return msg, None, None
 
     # TREND
@@ -277,58 +317,7 @@ def answer_query(query, df, numeric_cols, category_cols, date_cols):
             )
             fig = px.line(trend_data, x=date_col, y=measure, markers=True,
                            template=PLOTLY_TEMPLATE, color_discrete_sequence=[PRIMARY])
-            fig.update_layout(height=430)
-            return f"Here's the trend of **{measure}** over **{date_col}**.", fig, trend_data
-        return "I couldn't find a date column to build a trend.", None, None
 
-    # DISTRIBUTION
-    if "distribut" in q and measure:
-        fig = px.histogram(df, x=measure, nbins=30, template=PLOTLY_TEMPLATE,
-                            color_discrete_sequence=[ACCENT])
-        fig.update_layout(height=420)
-        return f"Distribution of **{measure}**.", fig, None
-
-    # TOP N
-    if n and category and measure:
-        top_data = (
-            df.groupby(category, dropna=False)[measure].sum()
-            .reset_index().sort_values(measure, ascending=False).head(n)
-        )
-        fig = px.bar(top_data, x=category, y=measure, text_auto=".2s",
-                     template=PLOTLY_TEMPLATE, color=category,
-                     color_discrete_sequence=COLOR_SEQUENCE)
-        fig.update_layout(height=440, showlegend=False)
-        return f"Top **{n}** `{category}` by **{measure}**.", fig, top_data
-
-    # SHOW / PLOT / COMPARE BY CATEGORY
-    if category and measure:
-        grouped = (
-            df.groupby(category, dropna=False)[measure].sum()
-            .reset_index().sort_values(measure, ascending=False).head(20)
-        )
-        if "pie" in q or "share" in q or "%" in q:
-            fig = px.pie(grouped, names=category, values=measure, hole=0.45,
-                         template=PLOTLY_TEMPLATE, color_discrete_sequence=COLOR_SEQUENCE)
-        else:
-            fig = px.bar(grouped, x=category, y=measure, text_auto=".2s",
-                         template=PLOTLY_TEMPLATE, color=category,
-                         color_discrete_sequence=COLOR_SEQUENCE)
-            fig.update_layout(showlegend=False)
-        fig.update_layout(height=440)
-        return f"Here's **{measure}** by **{category}**.", fig, grouped
-
-    # FALLBACK: just show measure summary
-    if measure:
-        fig = px.histogram(df, x=measure, nbins=30, template=PLOTLY_TEMPLATE,
-                            color_discrete_sequence=[PRIMARY])
-        fig.update_layout(height=420)
-        return (
-            f"I wasn't fully sure what you meant, so here's a quick look at **{measure}**. "
-            f"Try phrases like *'show sales by region'*, *'top 5 products'*, or *'trend of revenue'*.",
-            fig, None,
-        )
-
-    return "I couldn't understand that — try mentioning a column name from your dataset.", None, None
 
 
 # ===========================================================
