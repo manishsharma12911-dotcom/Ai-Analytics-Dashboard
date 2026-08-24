@@ -522,32 +522,36 @@ with tab_trends:
             trend_date = st.selectbox("Date column", date_columns, key="trend_date")
 
         freq_label = st.radio("Aggregate by", ["Day", "Week", "Month", "Year"], horizontal=True, index=2)
-        freq_map = {"Day": "D", "Week": "W", "Month": "M", "Year": "Y"}
+        # Use modern pandas offset aliases (pandas >= 2.2 deprecated "M"/"Y")
+        freq_map = {"Day": "D", "Week": "W", "Month": "ME", "Year": "YE"}
 
-        trend_data = filtered_df.dropna(subset=[trend_date]).copy()
-        trend_data = (
-            trend_data.set_index(trend_date)[trend_measure]
-            .resample(freq_map[freq_label]).sum()
-            .reset_index()
-        )
-        st.markdown(f'<div class="section-title">{trend_measure} Trend ({freq_label})</div>', unsafe_allow_html=True)
-        fig = px.area(trend_data, x=trend_date, y=trend_measure, template=PLOTLY_TEMPLATE,
-                       color_discrete_sequence=[PRIMARY])
-        fig.update_traces(line=dict(width=3))
-        fig.update_layout(height=460)
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Rolling comparison
-        if len(trend_data) > 1:
-            latest = trend_data[trend_measure].iloc[-1]
-            prior = trend_data[trend_measure].iloc[-2]
-            change = ((latest - prior) / prior * 100) if prior != 0 else 0
-            kpi_card(
-                f"Latest {freq_label} vs Previous",
-                format_number(latest),
-                delta=f"{change:+.1f}%",
-                delta_positive=change >= 0,
+        trend_data = filtered_df.dropna(subset=[trend_date, trend_measure]).copy()
+        if trend_data.empty:
+            st.info("No valid data available for the selected measure/date combination.")
+        else:
+            trend_data = (
+                trend_data.set_index(trend_date)[trend_measure]
+                .resample(freq_map[freq_label]).sum()
+                .reset_index()
             )
+            st.markdown(f'<div class="section-title">{trend_measure} Trend ({freq_label})</div>', unsafe_allow_html=True)
+            fig = px.area(trend_data, x=trend_date, y=trend_measure, template=PLOTLY_TEMPLATE,
+                           color_discrete_sequence=[PRIMARY])
+            fig.update_traces(line=dict(width=3))
+            fig.update_layout(height=460)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Rolling comparison
+            if len(trend_data) > 1:
+                latest = trend_data[trend_measure].iloc[-1]
+                prior = trend_data[trend_measure].iloc[-2]
+                change = ((latest - prior) / prior * 100) if prior != 0 else 0
+                kpi_card(
+                    f"Latest {freq_label} vs Previous",
+                    format_number(latest),
+                    delta=f"{change:+.1f}%",
+                    delta_positive=change >= 0,
+                )
     else:
         st.info("No date column detected in this dataset, so trend analysis isn't available.")
 
