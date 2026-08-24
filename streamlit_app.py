@@ -645,22 +645,16 @@ with tab_ask:
         message, fig, table = answer_query(query, filtered_df, numeric_columns, category_columns, date_columns)
         st.session_state.qa_history.insert(
             0,
-            {
-                "id": len(st.session_state.qa_history),
-                "query": query,
-                "message": message,
-                "fig": fig,
-                "table": table,
-            },
+            {"query": query, "message": message, "fig": fig, "table": table},
         )
 
-    for item in st.session_state.qa_history:
+    for idx, item in enumerate(st.session_state.qa_history):
         st.markdown(f'<div class="qa-answer">🗨️ <b>You asked:</b> "{item["query"]}"<br>🤖 {item["message"]}</div>',
                     unsafe_allow_html=True)
         if item["fig"] is not None:
-            st.plotly_chart(item["fig"], use_container_width=True, key=f"qa_chart_{item['id']}")
+            st.plotly_chart(item["fig"], use_container_width=True, key=f"qa_chart_{idx}")
         if item["table"] is not None:
-            st.dataframe(item["table"], use_container_width=True, hide_index=True, key=f"qa_table_{item['id']}")
+            st.dataframe(item["table"], use_container_width=True, hide_index=True, key=f"qa_table_{idx}")
         st.markdown("---")
 
     if not st.session_state.qa_history:
