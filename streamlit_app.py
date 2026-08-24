@@ -131,6 +131,29 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def coerce_numeric_like_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Some numeric columns (Sales, Revenue, Price...) get read as text because
+    of currency symbols, commas, or percent signs (e.g. "$1,234.56", "12%").
+    This detects and converts those columns to proper numeric dtype so they
+    show up as measures instead of being ignored.
+    """
+    df = df.copy()
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_datetime64_any_dtype(df[col]):
+            continue
+        series = df[col].astype(str).str.strip()
+        cleaned = series.str.replace(r"[,$€£₹%]", "", regex=True).str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+        parsed = pd.to_numeric(cleaned, errors="coerce")
+        non_null_original = series.replace({"": np.nan, "nan": np.nan}).notna()
+        if non_null_original.sum() == 0:
+            continue
+        valid_ratio = parsed.notna().sum() / non_null_original.sum()
+        if valid_ratio >= 0.9:
+            df[col] = parsed
+    return df
+
+
 def detect_date_columns(df: pd.DataFrame):
     date_cols = []
     for col in df.columns:
@@ -317,7 +340,65 @@ def answer_query(query, df, numeric_cols, category_cols, date_cols):
             )
             fig = px.line(trend_data, x=date_col, y=measure, markers=True,
                            template=PLOTLY_TEMPLATE, color_discrete_sequence=[PRIMARY])
+            fig.update_layout(height=430)
+            return f"Here's the trend of **{measure}**{filter_note} over **{date_col}**.", fig, trend_data
+        return "I couldn't find a date column to build a trend.", None, None
 
+    # DISTRIBUTION
+    if "distribut" in q and measure:
+        if df.empty:
+            return f"No rows match{filter_note}.", None, None
+        fig = px.histogram(df, x=measure, nbins=30, template=PLOTLY_TEMPLATE,
+                            color_discrete_sequence=[ACCENT])
+        fig.update_layout(height=420)
+        return f"Distribution of **{measure}**{filter_note}.", fig, None
+
+    # TOP N
+    if n and category and measure:
+        top_data = (
+            df.groupby(category, dropna=False)[measure].sum()
+            .reset_index().sort_values(measure, ascending=False).head(n)
+        )
+        fig = px.bar(top_data, x=category, y=measure, text_auto=".2s",
+                     template=PLOTLY_TEMPLATE, color=category,
+                     color_discrete_sequence=COLOR_SEQUENCE)
+        fig.update_layout(height=440, showlegend=False)
+        return f"Top **{n}** `{category}` by **{measure}**{filter_note}.", fig, top_data
+
+    # SHOW / PLOT / COMPARE BY CATEGORY
+    if category and measure:
+        grouped = (
+            df.groupby(category, dropna=False)[measure].sum()
+            .reset_index().sort_values(measure, ascending=False).head(20)
+        )
+        if "pie" in q or "share" in q or "%" in q:
+            fig = px.pie(grouped, names=category, values=measure, hole=0.45,
+                         template=PLOTLY_TEMPLATE, color_discrete_sequence=COLOR_SEQUENCE)
+        else:
+            fig = px.bar(grouped, x=category, y=measure, text_auto=".2s",
+                         template=PLOTLY_TEMPLATE, color=category,
+                         color_discrete_sequence=COLOR_SEQUENCE)
+            fig.update_layout(showlegend=False)
+        fig.update_layout(height=440)
+        return f"Here's **{measure}** by **{category}**{filter_note}.", fig, grouped
+
+    # If we only have a value filter + measure (e.g. "total sales in south region")
+    if measure and filter_col and not df.empty:
+        total = df[measure].sum()
+        return f"**Total {measure}**{filter_note} = **{format_number(total)}** (across {len(df):,} rows)", None, None
+
+    # FALLBACK: just show measure summary
+    if measure and not df.empty:
+        fig = px.histogram(df, x=measure, nbins=30, template=PLOTLY_TEMPLATE,
+                            color_discrete_sequence=[PRIMARY])
+        fig.update_layout(height=420)
+        return (
+            f"I wasn't fully sure what you meant, so here's a quick look at **{measure}**{filter_note}. "
+            f"Try phrases like *'show sales by region'*, *'top 5 products'*, or *'trend of revenue'*.",
+            fig, None,
+        )
+
+    return "I couldn't understand that — try mentioning a column name or value from your dataset.", None, None
 
 
 # ===========================================================
